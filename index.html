@@ -2702,6 +2702,14 @@ let _slideProgress = null;
 let _slideStart    = 0;
 let _lastSlideSave = 0;
 
+// ══ 라인 상태 필터 (가동현황 상단 배지를 눌러 해당 상태 라인만 표시) ══
+let _lineStatusFilter = new Set();
+function toggleLineStatusFilter(key) {
+  if (_lineStatusFilter.has(key)) _lineStatusFilter.delete(key);
+  else _lineStatusFilter.add(key);
+  renderSlicedLineStatus();
+}
+
 const SLIDE_STATUS_ORDER = { running: 0, stopped: 1, idle: 2, waiting: 3 };
 
 function lastRecDateForLine(line) {
@@ -2722,12 +2730,19 @@ function getAllSortedLines() {
     });
 }
 
-// 가동중 라인만 (자동전환 슬라이드 대상) — 최신실적순
+// 가동중 · 수리대기 라인 (자동전환 슬라이드 대상) — 상태순(가동중 먼저) → 최신실적순
+const SLIDE_INCLUDE_STATUS = ['running', 'waiting'];
 function getSortedLinesForSlide() {
   return LINES
     .map((line, idx) => ({ line, idx }))
-    .filter(({ line }) => (line.status || 'idle') === 'running')
-    .sort((a, b) => lastRecDateForLine(b.line).localeCompare(lastRecDateForLine(a.line)));
+    .filter(({ line }) => SLIDE_INCLUDE_STATUS.includes(line.status || 'idle'))
+    .filter(({ line }) => !_lineStatusFilter.size || _lineStatusFilter.has(line.status || 'idle'))
+    .sort((a, b) => {
+      const sa = SLIDE_STATUS_ORDER[a.line.status || 'idle'] ?? 2;
+      const sb = SLIDE_STATUS_ORDER[b.line.status || 'idle'] ?? 2;
+      if (sa !== sb) return sa - sb;
+      return lastRecDateForLine(b.line).localeCompare(lastRecDateForLine(a.line));
+    });
 }
 
 function slideTotalPages() {
@@ -2774,13 +2789,18 @@ function renderSlicedLineStatus() {
       if (l.status === 'running') runningWorkers.add(w);
     }));
 
-    const statusBadges = Object.entries(LINE_STATUS_CFG).map(([key, cfg]) =>
-      `<div data-status="${key}" style="display:flex;align-items:center;gap:5px;background:${cfg.bg};border:1px solid ${cfg.border};border-radius:20px;padding:4px 12px">
+    const hasFilter = _lineStatusFilter.size > 0;
+    const statusBadges = Object.entries(LINE_STATUS_CFG).map(([key, cfg]) => {
+      const on  = _lineStatusFilter.has(key);
+      const dim = hasFilter && !on;
+      return `<button type="button" data-status="${key}" onclick="toggleLineStatusFilter('${key}')"
+        title="'${cfg.label}' 라인만 보기 (다시 누르면 해제)"
+        style="display:flex;align-items:center;gap:5px;background:${cfg.bg};border:${on ? 2 : 1}px solid ${cfg.border};border-radius:20px;padding:${on ? '3px 11px' : '4px 12px'};cursor:pointer;font-family:inherit;opacity:${dim ? 0.4 : 1};box-shadow:${on ? `0 0 0 3px ${cfg.border}40` : 'none'};transition:opacity .15s,box-shadow .15s">
         <span style="font-size:14px">${cfg.icon}</span>
         <span style="font-size:12px;font-weight:700;color:${cfg.color}">${cfg.label}</span>
         <span style="font-family:'JetBrains Mono',monospace;font-size:15px;font-weight:700;color:${cfg.color}">${counts[key]}</span>
-      </div>`
-    ).join('');
+      </button>`;
+    }).join('');
 
     const workerBadges = `
       <div style="display:flex;align-items:center;gap:5px;background:rgba(0,212,255,0.13);border:1px solid var(--accent);border-radius:20px;padding:4px 12px">
@@ -2804,15 +2824,19 @@ function renderSlicedLineStatus() {
   if (_slideActive) {
     const sorted = getSortedLinesForSlide();
     if (!sorted.length) {
-      if (grid) grid.innerHTML = `<div style="text-align:center;padding:40px;color:var(--muted)">🟢 현재 가동중인 라인이 없습니다</div>`;
+      const msg = _lineStatusFilter.size ? '🔍 필터에 해당하는 라인이 없습니다' : '🟢 현재 가동중·수리대기 라인이 없습니다';
+      if (grid) grid.innerHTML = `<div style="text-align:center;padding:40px;color:var(--muted)">${msg}</div>`;
     } else {
       _slidePage = Math.min(_slidePage, sorted.length - 1);
       const { line, idx } = sorted[_slidePage];
       if (grid) grid.innerHTML = buildLineCard(line, idx, true);
     }
   } else {
-    const allSorted = getAllSortedLines();
-    if (grid) grid.innerHTML = allSorted.map(({ line, idx }) => buildLineCard(line, idx, false)).join('');
+    let allSorted = getAllSortedLines();
+    if (_lineStatusFilter.size) allSorted = allSorted.filter(({ line }) => _lineStatusFilter.has(line.status || 'idle'));
+    if (grid) grid.innerHTML = allSorted.length
+      ? allSorted.map(({ line, idx }) => buildLineCard(line, idx, false)).join('')
+      : `<div style="text-align:center;padding:40px;color:var(--muted)">🔍 해당 상태의 라인이 없습니다</div>`;
   }
   updateSlideDots();
   renderScheduleBottomPanel();
@@ -4658,6 +4682,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // ══ 업데이트 내용 (버전 올릴 때마다 수정) ══
 const UPDATE_NOTES = [
+  '🎛️ 가동현황 상단의 가동중·종료·비가동·수리대기 배지를 필터 버튼으로 변경 — 누르면 해당 상태 라인만 표시, 여러 개 동시 선택 가능, 다시 누르면 해제',
+  '🟡 가동현황 자동 전환(슬라이드) 대상에 "수리대기" 라인도 포함 (가동중 라인 먼저 표시)',
   '📊 이력조회 탭 "모델별 생산량 합계"에 가동률·성능·품질·OEE 표시 추가 (모델별 · 기간(일/주/월) 합계 모두)',
   '🗓️ 가동현황 하단 생산일정 패널을 작은 1줄형 리스트로 축소 — 카드형 대비 높이를 크게 줄여 화면을 덜 차지합니다',
   '🗓️ 생산일정 자동 완료 — 라인을 "가동중"으로 바꾸면 그 라인의 담당 품번 + 오늘 날짜와 정확히 일치하는 생산일정이 자동으로 삭제(완료 처리)됩니다 (날짜가 다른 일정은 유지)',
